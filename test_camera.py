@@ -2,80 +2,63 @@ import os
 import time
 import numpy as np
 import cv2
+from picamera2 import Picamera2  # Native modern Raspberry Pi camera driver
 
-# System Configurations
-CAMERA_INDEX = 0  # Change to 1 if you have multiple cameras connected
+# Configurations
 MODEL_PATH = "yolov8n.onnx"
-CONF_THRESHOLD = 0.35  # Minimum detection confidence level (35%)
+CONF_THRESHOLD = 0.35
 
-# ⚠️ MUST match the exact order your classes were arranged during training
+# ⚠️ Must match the exact order your classes were arranged during training
 CLASS_NAMES = ["apple", "banana", "orange"]
 
-# Box colors in BGR format
 COLORS = {
-    "apple": (0, 0, 255),     # Solid Red
-    "banana": (0, 255, 255),  # Solid Yellow
-    "orange": (0, 165, 255)   # Vivid Orange
+    "apple": (0, 0, 255),     # Red
+    "banana": (0, 255, 255),  # Yellow
+    "orange": (0, 165, 255)   # Orange
 }
-DEFAULT_COLOR = (0, 255, 0)   # Green fallback
+DEFAULT_COLOR = (0, 255, 0)
 
 def main():
-    # 1. Check Model Existence
+    # 1. Load ONNX Model via OpenCV DNN
     if not os.path.exists(MODEL_PATH):
-        print(f"❌ Error: Model file '{MODEL_PATH}' was not found in this directory.")
-        print("Please move your exported ONNX model into this folder to proceed.")
+        print(f"❌ Error: Model file '{MODEL_PATH}' not found in this folder.")
         return
 
-    print("🔄 Initializing OpenCV DNN Engine (Offline mode)...")
+    print("🔄 Loading ONNX model into OpenCV DNN...")
     net = cv2.dnn.readNetFromONNX(MODEL_PATH)
-    
-    # 2. Start Camera Feed Hardware
-    print("🔄 Opening live camera stream window...")
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    if not cap.isOpened():
-        print(f"❌ Error: Cannot access camera index {CAMERA_INDEX}.")
-        print("Please check physical connections or switch CAMERA_INDEX to 1.")
-        return
 
-    # Set standard hardware capture resolution
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    # 2. Initialize native Picamera2 (Exactly like the YouTuber)
+    print("🔄 Initializing Picamera2 hardware link...")
+    picam2 = Picamera2()
+    picam2.preview_configuration.main.size = (1280, 1280)
+    picam2.preview_configuration.main.format = "BGR888"  
+    picam2.preview_configuration.align()
+    picam2.configure("preview")
+    picam2.start()
 
-    # Establish named desktop render frame
-    window_name = "Raspberry Pi 4 - Kiosk AI Camera View"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-
-    print("🚀 Video pipeline active! Look at your desktop.")
-    print("👉 Click on the video window and press 'q' to shut down.")
+    print("🚀 Camera active via native drivers! Press 'q' to exit.")
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            time.sleep(0.01)
-            continue
+        start_time = time.time()
 
+        # 3. Capture frame-by-frame from Picamera2
+        frame = picam2.capture_array()
         orig_h, orig_w, _ = frame.shape
 
-        # 3. Scale and normalize image frame to YOLO standard square sizes
+        # 4. Preprocess Image for YOLOv8 (640x640)
         blob = cv2.dnn.blobFromImage(frame, 1.0/255.0, (640, 640), swapRB=True, crop=False)
         net.setInput(blob)
         
-        # 4. Generate forward calculation array matrices
+        # 5. Run Model Inference (Entirely Offline)
         outputs = net.forward()
         
-        # Dynamic matrix reshape to safe shape conversion regardless of export tool variants
-        if len(outputs.shape) == 3:
-            predictions = outputs[0]
-        else:
-            predictions = outputs
-
-        # Check if row and column arrays are reversed (Common variation across platforms)
+        # Safe matrix handling for 32-bit architecture
+        predictions = outputs[0] if len(outputs.shape) == 3 else outputs
         if predictions.shape[0] < predictions.shape[1]:
             predictions = np.transpose(predictions, (1, 0))
 
-        # 5. Process tracking positions and draw on overlay layer
+        # 6. Parse Predictions and Draw Squares
         for pred in predictions:
-            # Safely split class fields away from coordinates mapping bounds
             bounding_box = pred[0:4]
             class_scores = pred[4:]
             
@@ -85,45 +68,46 @@ def main():
             class_id = np.argmax(class_scores)
             confidence = class_scores[class_id]
 
-            # Bounding box filter block execution
             if confidence >= CONF_THRESHOLD:
                 if class_id < len(CLASS_NAMES):
                     label_name = CLASS_NAMES[class_id]
                     
-                    # Read relative midpoint vectors
+                    # Convert coordinates to real camera frame pixels
                     cx, cy, bw, bh = bounding_box
-                    
-                    # Calculate real standard absolute pixel scale targets
                     x1 = int((cx - bw / 2) * (orig_w / 640.0))
                     y1 = int((cy - bh / 2) * (orig_h / 640.0))
                     x2 = int((cx + bw / 2) * (orig_w / 640.0))
                     y2 = int((cy + bh / 2) * (orig_h / 640.0))
 
-                    # Apply color configurations
                     box_color = COLORS.get(label_name, DEFAULT_COLOR)
 
-                    # Draw square above item bounding frame
+                    # Draw item square
                     cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 3)
 
-                    # Compose label background header tag text string bounds
+                    # Draw text label background header
                     text_str = f"{label_name.upper()} ({confidence*100:.0f}%)"
                     (tw, th), _ = cv2.getTextSize(text_str, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                    
-                    # Draw solid block behind text label for contrast
                     cv2.rectangle(frame, (x1, y1 - 25), (x1 + tw, y1), box_color, -1)
                     cv2.putText(frame, text_str, (x1, y1 - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-        # 6. Render the composite frame image to our open window UI
-        cv2.imshow(window_name, frame)
+        # 7. Calculate and display live FPS stats
+        elapsed_time = time.time() - start_time
+        fps = 1 / elapsed_time if elapsed_time > 0 else 0.0
+        fps_text = f"FPS: {fps:.1f}"
+        
+        cv2.putText(frame, fps_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
 
-        # Break active tracking loop cleanly on 'q' terminal keyboard interruption
+        # 8. Render window layout
+        cv2.imshow("Camera View - Kiosk AI", frame)
+
+        # Break loop if 'q' is pressed
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-    # Shutdown drivers and release handles
-    cap.release()
+    # Clean cleanup
+    picam2.stop()
     cv2.destroyAllWindows()
-    print("👋 Camera tracking system closed safely.")
+    print("👋 Kiosk system closed successfully.")
 
 if __name__ == "__main__":
     main()
