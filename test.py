@@ -426,22 +426,31 @@ class FruitKioskApp:
     def detect_fruits(self, frame):
         detected = {}
         
-        # OpenCV DNN Preprocessing (YOLOv8 size format, scaling normalization, BGR to RGB swap)
+        # 1. Image normalization
         blob = cv2.dnn.blobFromImage(frame, 1/255.0, (640, 640), swapRB=True, crop=False)
         self.net.setInput(blob)
         
-        # Forward pass output
+        # 2. Get output array safely
         outputs = self.net.forward()
         
-        # Post-process dimensions array mapping
-        predictions = np.squeeze(outputs)
-        predictions = np.transpose(predictions, (1, 0))
+        # Safe dimensional collapse (Handles both 2D and 3D output blocks gracefully)
+        if len(outputs.shape) == 3:
+            predictions = outputs[0]
+        else:
+            predictions = outputs
+
+        # Dynamic array shape check to prevent line 470 crash
+        if predictions.shape[0] < predictions.shape[1]:
+            predictions = np.transpose(predictions, (1, 0))
 
         counts = {name: 0 for name in CLASS_NAMES}
         conf_threshold = 0.40
 
+        # 3. Read array records
         for pred in predictions:
             scores = pred[4:] 
+            if len(scores) == 0:
+                continue
             class_id = np.argmax(scores)
             confidence = scores[class_id]
 
@@ -450,6 +459,7 @@ class FruitKioskApp:
                     label = CLASS_NAMES[class_id]
                     counts[label] += 1
 
+        # 4. Save results
         for label, count in counts.items():
             if count > 0 and label in ITEM_INFO:
                 info = ITEM_INFO[label]
@@ -463,7 +473,6 @@ class FruitKioskApp:
                 }
 
         return detected
-
 
 if __name__ == "__main__":
     root = tk.Tk()
